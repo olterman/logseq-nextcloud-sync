@@ -1,0 +1,23 @@
+{
+  "name": "logseq-nextcloud-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch"
+  },
+  "dependencies": {
+    "@logseq/libs": "^0.0.17"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  },
+  "logseq": {
+    "id": "logseq-nextcloud-sync",
+    "title": "Logseq Nextcloud Sync"
+  },
+  "effect": true
+}
