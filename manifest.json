@@ -1,0 +1,10 @@
+{
+  "id": "logseq-nextcloud-sync",
+  "title": "Logseq Nextcloud Sync",
+  "description": "Sync Logseq tasks and calendar events with Nextcloud over CalDAV.",
+  "author": "Patrik Olterman",
+  "repo": "https://github.com/olterman/logseq-nextcloud-sync",
+  "main": "dist/index.js",
+  "effect": true,
+  "version": "0.1.0"
+}

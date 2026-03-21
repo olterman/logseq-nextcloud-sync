@@ -1,9 +1,19 @@
 {
   "name": "logseq-nextcloud-sync",
   "version": "0.1.0",
-  "private": true,
+  "description": "Logseq plugin for syncing tasks and calendar events with Nextcloud over CalDAV.",
+  "author": "Patrik Olterman",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "homepage": "https://github.com/olterman/logseq-nextcloud-sync",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/olterman/logseq-nextcloud-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/olterman/logseq-nextcloud-sync/issues"
+  },
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch"
