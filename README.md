@@ -66,14 +66,14 @@ If both page types and tags are set, a page is included when it matches either l
 Build:
 
 ```bash
-cd /home/olterman/Projects/logseq-nextcloud-sync
+cd ~/Projects/logseq-nextcloud-sync
 npm run build
 ```
 
 Typecheck:
 
 ```bash
-cd /home/olterman/Projects/logseq-nextcloud-sync
+cd ~/Projects/logseq-nextcloud-sync
 ./node_modules/.bin/tsc -p tsconfig.json --noEmit
 ```
 
