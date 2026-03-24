@@ -88,14 +88,16 @@ const uiState = {
   calendarSelectorSlot: "",
   taskScopeManagerSlot: "",
   syncHubSlot: "",
-  profileEditorSlot: ""
+  profileEditorSlot: "",
+  profileTaskArgs: {} as Record<string, string[]>
 };
 
 const uiKeys = {
   calendarSelector: "nextcloud-calendar-selector",
   taskScopeManager: "nextcloud-task-scope-manager",
   syncHub: "nextcloud-sync-hub",
-  profileEditor: "nextcloud-profile-editor"
+  profileEditor: "nextcloud-profile-editor",
+  profileTasks: "nextcloud-profile-tasks"
 } as const;
 
 function slotUiKey(baseKey: string, slot: string): string {
@@ -837,6 +839,191 @@ function describePeriodicSync(scope?: Pick<SyncProfileConfig, "updatePeriodicall
   if (scope?.updatePeriodically !== true) return "no";
   const minutes = Math.max(1, Number(scope?.updateIntervalMinutes || 15) || 15);
   return `yes, every ${minutes} min`;
+}
+
+function normalizeTaskListTag(input: string) {
+  return String(input ?? "").trim().toLowerCase();
+}
+
+function isRenderableProfileTask(task: LogseqTaskItem) {
+  const marker = normalizeTaskListTag(task.marker || task.taskState || "");
+  if (!marker || marker === "done" || marker === "cancelled") return false;
+
+  const title = String(task.title || "").trim();
+  if (!title) return false;
+
+  const content = String(task.sourceBlockContent || "").toLowerCase();
+  if (content.includes("#habit-tracker")) return false;
+
+  return true;
+}
+
+function getProfileTaskPriority(task: LogseqTaskItem) {
+  const content = String(task.sourceBlockContent || "");
+  const match = content.match(/\[\#([A-Z])\]/i);
+  return String(match?.[1] || "").toUpperCase();
+}
+
+function getProfileTaskPriorityRank(task: LogseqTaskItem) {
+  const priority = getProfileTaskPriority(task);
+  if (priority === "A") return 0;
+  if (priority === "B") return 1;
+  if (priority === "C") return 2;
+  return 3;
+}
+
+async function markProfileTaskBlockState(blockUuid: string, completed: boolean) {
+  const editor = logseq.Editor as any;
+  const block = await editor.getBlock?.(blockUuid, { includeChildren: false });
+  if (!block || typeof block.content !== "string") return false;
+  const current = String(block.content);
+  const isDone = /^\s*DONE\b/i.test(current);
+  if (completed && isDone) return false;
+  if (!completed && !isDone) return false;
+
+  const updated = completed
+    ? current.replace(/^\s*(TODO|DOING|LATER|WAITING|NOW|CANCELLED)\b/i, "DONE")
+    : current.replace(/^\s*DONE\b/i, "TODO");
+  await editor.updateBlock?.(blockUuid, updated);
+  return updated !== current;
+}
+
+function findProfileByIdentifier(identifier: string) {
+  const target = normalizeText(identifier || "");
+  const profiles = getSyncProfiles(settings());
+  if (!target) return getActiveSyncProfile(settings()) ?? null;
+
+  return (
+    profiles.find((profile) => normalizeText(profile.id) === target) ??
+    profiles.find((profile) => normalizeText(profile.name) === target) ??
+    null
+  );
+}
+
+async function renderProfileTasksMacro(slot: string, args: string[]) {
+  if (!slot || typeof logseq.provideUI !== "function") return;
+
+  const identifier = String(args[1] || "").trim();
+  const profile = findProfileByIdentifier(identifier);
+  if (!profile) {
+    logseq.provideUI({
+      key: slotUiKey(uiKeys.profileTasks, slot),
+      slot,
+      reset: true,
+      template: `<div class="nextcloud-selector"><div class="nextcloud-selector__status">Profile not found${identifier ? `: ${escapeHtml(identifier)}` : ""}.</div></div>`
+    });
+    return;
+  }
+
+  try {
+    const scopeSettings = withProfileSettings(settings(), profile);
+    const tasks = await collectLogseqTasksForScope(profile as TaskScopeConfig, scopeSettings);
+    const filtered = tasks
+      .filter(isRenderableProfileTask)
+      .sort((left, right) => {
+        const priorityCompare = getProfileTaskPriorityRank(left) - getProfileTaskPriorityRank(right);
+        if (priorityCompare !== 0) return priorityCompare;
+        const pageCompare = String(left.pageName || "").localeCompare(String(right.pageName || ""));
+        if (pageCompare !== 0) return pageCompare;
+        return String(left.title || "").localeCompare(String(right.title || ""));
+      });
+
+    const listMarkup = filtered.length
+      ? `<ul class="nextcloud-profile-tasks__list">${filtered
+          .map((task) => {
+            const pageName = String(task.pageName || "").trim();
+            const pageLabel = pageName ? `<button class="nextcloud-profile-tasks__page" data-on-click="openTaskRendererPage" data-page-name="${escapeHtml(pageName)}">${escapeHtml(pageName)}</button>` : "";
+            const canToggle = Boolean(String(task.sourceBlockUuid || "").trim());
+            const priority = getProfileTaskPriority(task);
+            const toggleButton = canToggle
+              ? `<button class="nextcloud-profile-tasks__toggle nextcloud-profile-tasks__toggle--priority-${escapeHtml(
+                  priority ? priority.toLowerCase() : "none"
+                )}" data-on-click="toggleProfileTaskRendererItem" data-block-uuid="${escapeHtml(
+                  String(task.sourceBlockUuid || "")
+                )}" data-slot="${escapeHtml(slot)}" data-completed="true" aria-label="Mark done">○</button>`
+              : `<span class="nextcloud-profile-tasks__toggle nextcloud-profile-tasks__toggle--disabled">○</span>`;
+            return `<li class="nextcloud-profile-tasks__item">${toggleButton}<span class="nextcloud-profile-tasks__title">${escapeHtml(task.title)}</span>${pageLabel}</li>`;
+          })
+          .join("")}</ul>`
+      : `<div class="nextcloud-selector__status">No unfinished tasks found for ${escapeHtml(profile.name)}.</div>`;
+
+    logseq.provideUI({
+      key: slotUiKey(uiKeys.profileTasks, slot),
+      slot,
+      reset: true,
+      template: `
+        <div class="nextcloud-profile-tasks">
+          <div class="nextcloud-profile-tasks__header">
+            <span class="nextcloud-profile-tasks__heading">Tasks ${escapeHtml(profile.name)}</span>
+            <span class="nextcloud-profile-tasks__count">${filtered.length}</span>
+          </div>
+          ${listMarkup}
+        </div>
+      `
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+    logseq.provideUI({
+      key: slotUiKey(uiKeys.profileTasks, slot),
+      slot,
+      reset: true,
+      template: `<div class="nextcloud-selector"><div class="nextcloud-selector__status">Task renderer failed: ${escapeHtml(message)}</div></div>`
+    });
+  }
+}
+
+async function rerenderProfileTaskSlot(slot: string) {
+  const args = uiState.profileTaskArgs[slot];
+  if (!slot || !args?.length) return;
+  await renderProfileTasksMacro(slot, args);
+}
+
+async function expandProfileTaskRefsMacro(args: string[], payload: any) {
+  const editor = logseq.Editor as any;
+  const blockUuid = String(payload?.uuid || "").trim();
+  if (!blockUuid) return;
+
+  const identifier = String(args[1] || "").trim();
+  const profile = findProfileByIdentifier(identifier);
+  if (!profile) {
+    logseq.UI.showMsg?.(`Profile not found${identifier ? `: ${identifier}` : ""}.`, "warning", { timeout: 5000 });
+    return;
+  }
+
+  const block = await editor.getBlock?.(blockUuid, { includeChildren: true });
+  const currentContent = String(block?.content || "").trim();
+  if (!currentContent.includes("nextcloud-profile-task-refs")) return;
+
+  const scopeSettings = withProfileSettings(settings(), profile);
+  const tasks = await collectLogseqTasksForScope(profile as TaskScopeConfig, scopeSettings);
+  const refs = tasks
+    .filter((task) => isRenderableProfileTask(task) && String(task.sourceBlockUuid || "").trim())
+    .filter((task) => String(task.sourceBlockUuid || "").trim() !== blockUuid)
+    .sort((left, right) => {
+      const priorityCompare = getProfileTaskPriorityRank(left) - getProfileTaskPriorityRank(right);
+      if (priorityCompare !== 0) return priorityCompare;
+      const pageCompare = String(left.pageName || "").localeCompare(String(right.pageName || ""));
+      if (pageCompare !== 0) return pageCompare;
+      return String(left.title || "").localeCompare(String(right.title || ""));
+    });
+
+  const existingChildren = Array.isArray(block?.children) ? block.children : [];
+  for (const child of existingChildren) {
+    if (child?.uuid) {
+      await editor.removeBlock?.(child.uuid);
+    }
+  }
+
+  await editor.updateBlock?.(blockUuid, `Tasks ${profile.name}`);
+
+  if (!refs.length) {
+    await editor.insertBlock?.(blockUuid, "No unfinished tasks found.", { sibling: false, isPageBlock: false });
+    return;
+  }
+
+  for (const task of refs) {
+    await editor.insertBlock?.(blockUuid, `{{embed ((${task.sourceBlockUuid}))}}`, { sibling: false, isPageBlock: false });
+  }
 }
 
 function describeCalendarScope(scope?: Pick<CalendarScopeConfig, "propertyKey" | "propertyValue"> | null) {
@@ -2171,6 +2358,94 @@ function providePluginStyle() {
       justify-content: flex-start;
       margin-top: 10px;
     }
+    .nextcloud-profile-tasks {
+      width: 100%;
+      padding: 0;
+      background: transparent;
+    }
+    .nextcloud-profile-tasks__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 10px;
+    }
+    .nextcloud-profile-tasks__heading {
+      font-size: 1.7rem;
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      color: var(--ls-secondary-text-color, rgba(255, 255, 255, 0.72));
+    }
+    .nextcloud-profile-tasks__count {
+      font-size: 0.95rem;
+      opacity: 0.7;
+      padding-top: 0.25rem;
+    }
+    .nextcloud-profile-tasks__list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .nextcloud-profile-tasks__item {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+    }
+    .nextcloud-profile-tasks__item--completed {
+      opacity: 0.65;
+    }
+    .nextcloud-profile-tasks__title {
+      margin-right: 8px;
+      flex: 1 1 auto;
+      line-height: 1.35;
+    }
+    .nextcloud-profile-tasks__item--completed .nextcloud-profile-tasks__title {
+      text-decoration: line-through;
+    }
+    .nextcloud-profile-tasks__toggle {
+      border: 2px solid var(--ls-border-color);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--ls-link-text-color, var(--ls-primary-text-color));
+      cursor: pointer;
+      padding: 0;
+      font-size: 1.2rem;
+      line-height: 1;
+      width: 1.55rem;
+      height: 1.55rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 1.55rem;
+    }
+    .nextcloud-profile-tasks__toggle--disabled {
+      opacity: 0.35;
+    }
+    .nextcloud-profile-tasks__toggle--priority-a {
+      color: #ef4444;
+      border-color: #ef4444;
+    }
+    .nextcloud-profile-tasks__toggle--priority-b {
+      color: #f59e0b;
+      border-color: #f59e0b;
+    }
+    .nextcloud-profile-tasks__toggle--priority-c {
+      color: #14b8a6;
+      border-color: #14b8a6;
+    }
+    .nextcloud-profile-tasks__page {
+      border: none;
+      background: transparent;
+      color: var(--ls-link-text-color, var(--ls-primary-text-color));
+      padding: 0;
+      cursor: pointer;
+      font-size: 0.9em;
+      opacity: 0.75;
+      text-decoration: underline;
+    }
   `);
 }
 
@@ -2178,7 +2453,9 @@ function mountInlineUi() {
   if (typeof logseq.App?.onMacroRendererSlotted !== "function" || typeof logseq.provideUI !== "function") return;
   logseq.App.onMacroRendererSlotted(({ slot, payload }: any) => {
     const args = Array.isArray(payload?.arguments) ? payload.arguments : [];
-    const macroName = args[0];
+    const macroName = String(args[0] || "")
+      .trim()
+      .replace(/,$/, "");
     if (macroName === ":nextcloud-sync-hub") {
       uiState.syncHubSlot = slot;
       scheduleSlottedRender(() => {
@@ -2204,6 +2481,21 @@ function mountInlineUi() {
       uiState.taskScopeManagerSlot = slot;
       scheduleSlottedRender(() => {
         if (uiState.taskScopeManagerSlot === slot) syncTaskScopeManagerUI();
+      });
+      return;
+    }
+    if (macroName === ":nextcloud-profile-tasks" || macroName === "nextcloud-profile-tasks") {
+      uiState.profileTaskArgs[slot] = args;
+      scheduleSlottedRender(() => {
+        void renderProfileTasksMacro(slot, args);
+      });
+      return;
+    }
+    if (macroName === ":nextcloud-profile-task-refs" || macroName === "nextcloud-profile-task-refs") {
+      scheduleSlottedRender(() => {
+        void expandProfileTaskRefsMacro(args, payload).catch((error) => {
+          console.warn("[nextcloud-sync] profile task refs expansion failed", error);
+        });
       });
     }
   });
@@ -3753,6 +4045,30 @@ logseq.ready(async () => {
       },
       openCalendarOverviewPage: async () => {
         openPage(settings().calendarPageName || defaultSettings.calendarPageName);
+      },
+      openTaskRendererPage: async (e: any) => {
+        const pageName = String(readDatasetValue(e, "pageName") || "").trim();
+        if (!pageName) return;
+        openPage(pageName);
+      },
+      toggleProfileTaskRendererItem: async (e: any) => {
+        const blockUuid = String(readDatasetValue(e, "blockUuid") || "").trim();
+        const slot = String(readDatasetValue(e, "slot") || "").trim();
+        const completed = /^true$/i.test(String(readDatasetValue(e, "completed") || "false"));
+        if (!blockUuid) return;
+        await markProfileTaskBlockState(blockUuid, completed);
+        const target = e?.target as HTMLElement | undefined;
+        const item = target?.closest?.(".nextcloud-profile-tasks__item") as HTMLElement | null | undefined;
+        if (completed && item) {
+          item.classList.add("nextcloud-profile-tasks__item--completed");
+          const toggle = item.querySelector(".nextcloud-profile-tasks__toggle") as HTMLElement | null;
+          if (toggle) toggle.textContent = "●";
+          window.setTimeout(() => {
+            void rerenderProfileTaskSlot(slot);
+          }, 700);
+          return;
+        }
+        await rerenderProfileTaskSlot(slot);
       },
       openCalendarPickerPage: async () => {
         await ensureCalendarSelectorPage();
